@@ -10,11 +10,24 @@ export function TakeAttendancePage() {
   const { user } = useAuth();
   const [courses, setCourses] = useState<any[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>('');
+  const [selectedCourse, setSelectedCourse] = useState<any>(null);
   const [activeSession, setActiveSession] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    // Check if course was selected from dashboard
+    const storedCourse = sessionStorage.getItem('selectedCourse');
+    if (storedCourse) {
+      const course = JSON.parse(storedCourse);
+      setSelectedCourse(course);
+      setSelectedCourseId(course._id);
+      sessionStorage.removeItem('selectedCourse');
+      // Auto-start session for the selected course
+      handleStartSession(course._id);
+      return;
+    }
+
     const fetchCourses = async () => {
       if (!user || user.role !== 'faculty') return;
       setIsLoading(true);
@@ -30,16 +43,19 @@ export function TakeAttendancePage() {
     fetchCourses();
   }, [user]);
 
-  const handleStartSession = async () => {
-    if (!selectedCourseId) {
+  const handleStartSession = async (courseId?: string) => {
+    const targetCourseId = courseId || selectedCourseId;
+    if (!targetCourseId) {
       setError('Please select a course to start a session.');
       return;
     }
     setError('');
     setIsLoading(true);
     try {
-      const response = await apiService.startAttendanceSession({ courseId: selectedCourseId });
+      const response = await apiService.startAttendanceSession({ courseId: targetCourseId });
       setActiveSession(response.session);
+      const course = courses.find(c => c._id === targetCourseId);
+      setSelectedCourse(course);
     } catch (err: any) {
       setError(err.message || 'Failed to start session.');
     } finally {
@@ -48,13 +64,12 @@ export function TakeAttendancePage() {
   };
 
   if (activeSession) {
-    const course = courses.find(c => c._id === activeSession.courseId);
     return (
       <CameraCapture
         mode="attendance"
         isActive={true}
         sessionId={activeSession._id}
-        courseName={course?.courseName}
+        courseName={selectedCourse?.courseName || 'Unknown Course'}
         onSessionEnd={() => setActiveSession(null)}
       />
     );

@@ -37,6 +37,7 @@ export function StudentRegistration({ onNavigate }: StudentRegistrationProps) {
   const handleImageCapture = (imageData: string) => {
     if (capturedImages.length < 10) {
       setCapturedImages(prev => [...prev, imageData]);
+      setError(''); // Clear any previous errors
     }
   };
 
@@ -126,12 +127,23 @@ export function StudentRegistration({ onNavigate }: StudentRegistrationProps) {
           <div>
              <h3 className="text-xl font-semibold text-gray-900 mb-2">Step 2: Face Registration</h3>
              <p className="text-gray-600 mb-4">Position your face in the center of the frame and capture multiple images.</p>
-             <CameraCapture mode="registration" isActive={true} onCapture={handleImageCapture} />
+             <CameraCapture 
+               mode="registration" 
+               isActive={isCameraActive || step === 2} 
+               onCapture={handleImageCapture} 
+             />
              {capturedImages.length > 0 && (
                 <div className="mt-4">
                     <h4 className="font-semibold text-gray-800">Captured Images: {capturedImages.length}/10</h4>
                     <div className="flex flex-wrap gap-2 mt-2">
-                        {capturedImages.map((img, i) => <img key={i} src={img} className="w-20 h-20 object-cover rounded-md border-2 border-green-500" />)}
+                        {capturedImages.map((img, i) => (
+                          <img 
+                            key={i} 
+                            src={img} 
+                            alt={`Captured face ${i + 1}`}
+                            className="w-20 h-20 object-cover rounded-md border-2 border-green-500" 
+                          />
+                        ))}
                     </div>
                 </div>
              )}
@@ -141,7 +153,16 @@ export function StudentRegistration({ onNavigate }: StudentRegistrationProps) {
         {step === 3 && (
           <div>
             <h3 className="text-xl font-semibold text-gray-900 mb-6">Step 3: Review & Confirm</h3>
-            {/* ... review details UI ... */}
+            <div className="space-y-4">
+              <div className="grid md:grid-cols-2 gap-4">
+                <div><strong>Student ID:</strong> {studentData.studentId}</div>
+                <div><strong>Name:</strong> {studentData.name}</div>
+                <div><strong>Email:</strong> {studentData.email}</div>
+                <div><strong>Course:</strong> {studentData.course}</div>
+                <div><strong>Department:</strong> {studentData.department}</div>
+                <div><strong>Face Images:</strong> {capturedImages.length} captured</div>
+              </div>
+            </div>
             <p className="text-center text-gray-700">Please confirm all details are correct before submission.</p>
           </div>
         )}
