@@ -73,14 +73,6 @@ export function LoginPage({ role, onRoleSwitch }: LoginPageProps) {
             <Button type="submit" fullWidth size="lg" isLoading={isLoading} className={`bg-gradient-to-r ${roleInfo.color}`}>
               {isLoading ? 'Signing in...' : 'Sign In'}
             </Button>
-          </form>
-        </Card>
-
-        <div className="text-center">
-          <Button variant="outline" onClick={onRoleSwitch} fullWidth>
-            Switch Login Type
-          </Button>
-        </div>
       </div>
     </div>
   );

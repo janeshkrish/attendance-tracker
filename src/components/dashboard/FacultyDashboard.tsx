@@ -7,11 +7,10 @@ import apiService from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 
 interface FacultyDashboardProps {
-  onStartAttendance: (course: { id: string, name: string }) => void;
   onNavigate: (page: string) => void;
 }
 
-export function FacultyDashboard({ onStartAttendance, onNavigate }: FacultyDashboardProps) {
+export function FacultyDashboard({ onNavigate }: FacultyDashboardProps) {
   const { user } = useAuth();
   const [stats, setStats] = useState<any>({});
   const [courses, setCourses] = useState<any[]>([]);
@@ -19,20 +18,17 @@ export function FacultyDashboard({ onStartAttendance, onNavigate }: FacultyDashb
 
   useEffect(() => {
     const fetchDashboardData = async () => {
-      if (!user || !(user as any).facultyData) return;
       setIsLoading(true);
       try {
-        const facultyId = (user as any).facultyData._id;
         const [coursesResponse, userStats] = await Promise.all([
-            apiService.getCourses({ facultyId }),
-            // This should be a dedicated stats endpoint
-            apiService.get('/users/stats/overview'), 
+          apiService.getCourses(),
+          apiService.get('/users/stats/overview'), 
         ]);
         
         setCourses(coursesResponse.courses);
         setStats({
-            courses: coursesResponse.total,
-            students: coursesResponse.courses.reduce((sum: number, c: any) => sum + c.enrolledStudents.length, 0)
+          courses: coursesResponse.total,
+          students: coursesResponse.courses.reduce((sum: number, c: any) => sum + (c.enrolledStudents?.length || 0), 0)
         });
 
       } catch (error) {
@@ -44,6 +40,11 @@ export function FacultyDashboard({ onStartAttendance, onNavigate }: FacultyDashb
     fetchDashboardData();
   }, [user]);
 
+  const handleStartAttendance = (course: { _id: string, courseName: string }) => {
+    // Store course info in sessionStorage for the attendance page
+    sessionStorage.setItem('selectedCourse', JSON.stringify(course));
+    onNavigate('attendance');
+  };
   if (isLoading) return <div className="text-center p-8">Loading dashboard...</div>;
 
   return (
@@ -65,9 +66,9 @@ export function FacultyDashboard({ onStartAttendance, onNavigate }: FacultyDashb
               <div key={course._id} className="p-4 rounded-lg border flex justify-between items-center">
                 <div>
                   <h4 className="font-medium">{course.courseName} ({course.courseCode})</h4>
-                  <p className="text-sm text-gray-500">{course.enrolledStudents.length} students</p>
+                  <p className="text-sm text-gray-500">{course.enrolledStudents?.length || 0} students</p>
                 </div>
-                <Button variant="primary" size="sm" onClick={() => onStartAttendance({ id: course._id, name: course.courseName })}>
+                <Button variant="primary" size="sm" onClick={() => handleStartAttendance(course)}>
                   <Camera className="h-4 w-4 mr-1" />
                   Start Session
                 </Button>
