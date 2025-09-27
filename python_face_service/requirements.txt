@@ -1,0 +1,12 @@
+python-dotenv
+pymongo[srv]
+opencv-python
+Pillow
+bcrypt
+openpyxl
+face-recognition
+numpy
+scipy
+fastapi
+uvicorn[standard]
+python-multipart
