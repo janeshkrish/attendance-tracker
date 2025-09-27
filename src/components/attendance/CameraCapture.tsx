@@ -3,6 +3,7 @@ import { Camera, CameraOff, CheckCircle, PauseCircle, RefreshCw } from 'lucide-r
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import apiService from '../../services/api';
+import faceApi from "../../services/faceApi";
 
 interface CameraCaptureProps {
   onCapture?: (imageData: string) => void;
@@ -136,7 +137,7 @@ export function CameraCapture({
     if (mode === 'attendance' && sessionId && !isProcessing) {
       setIsProcessing(true);
       try {
-        const response = await apiService.recognizeFace(imageData, sessionId);
+        const response = await faceApi.recognizeFace(imageData);
         if (response.results.length > 0) {
           for (const recognized of response.results) {
             if (!recognizedStudents.some(s => s.studentId === recognized.studentId)) {
