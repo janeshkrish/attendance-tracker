@@ -1,12 +1,55 @@
-python-dotenv
-pymongo[srv]
-opencv-python
-Pillow
-bcrypt
-openpyxl
-face-recognition
-numpy
-scipy
-fastapi
-uvicorn[standard]
-python-multipart
+# Enhanced Python Face Service Requirements
+# Core ML/AI Libraries
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0  # For YOLO face detection
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Face Recognition & ArcFace
+insightface>=0.7.3  # For ArcFace implementation
+scikit-learn>=1.3.0
+onnxruntime>=1.15.0  # For optimized inference
+
+# Deep Learning for Liveness Detection
+tensorflow>=2.13.0  # For CNN liveness model
+keras>=2.13.0
+
+# API Framework
+fastapi>=0.103.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+
+# Database & Storage
+pymongo[srv]>=4.5.0
+motor>=3.3.0  # Async MongoDB driver
+
+# Utilities
+python-dotenv>=1.0.0
+bcrypt>=4.0.0
+openpyxl>=3.1.0
+requests>=2.31.0
+pydantic>=2.3.0
+python-jose[cryptography]>=3.3.0
+
+# Image Processing & Computer Vision
+albumentations>=1.3.0  # For data augmentation
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Performance & Monitoring
+psutil>=5.9.0
+tqdm>=4.66.0
+
+# Development & Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.7.0
+flake8>=6.0.0
+
+# Additional face processing utilities
+dlib>=19.24.2  # For facial landmarks if needed
+face-recognition>=1.3.0  # Fallback compatibility
+#mediapipe>=0.10.0  # Alternative face detection option

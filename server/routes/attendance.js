@@ -1,330 +1,611 @@
+// Enhanced attendance route with face recognition integration
 const express = require('express');
+const router = express.Router();
+const axios = require('axios');
 const Attendance = require('../models/Attendance');
 const AttendanceSession = require('../models/AttendanceSession');
 const Student = require('../models/Student');
 const Course = require('../models/Course');
-const Faculty = require('../models/Faculty');
-const { auth, authorize, auditLog } = require('../middleware/auth');
-const mongoose = require('mongoose');
-const faceRecognitionService = require('../services/faceRecognition');
+const { authenticateToken, requireRole } = require('../middleware/auth');
+const { body, validationResult } = require('express-validator');
 
-const router = express.Router();
+// Face recognition service URL
+const FACE_API_URL = process.env.FACE_API_URL || 'http://localhost:8000';
 
-// Start attendance session
-router.post('/sessions', auth, authorize('faculty'), auditLog('CREATE', 'ATTENDANCE_SESSION'), async (req, res) => {
+/**
+ * Start a new attendance session with face recognition
+ * POST /api/attendance/sessions/start
+ */
+router.post('/sessions/start', [
+  authenticateToken,
+  requireRole(['faculty', 'admin']),
+  body('courseId').notEmpty().withMessage('Course ID is required'),
+  body('sessionName').notEmpty().withMessage('Session name is required'),
+  body('enableFaceRecognition').isBoolean().optional()
+], async (req, res) => {
   try {
-    const { courseId } = req.body;
-    
-    if (!courseId) {
-      return res.status(400).json({ message: 'Course ID is required' });
-    }
-
-    // Verify course exists and belongs to faculty
-    const course = await Course.findById(courseId).populate('enrolledStudents');
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
-
-    // Check if faculty owns this course
-    const faculty = await Faculty.findOne({ userId: req.user._id });
-    if (!faculty || course.facultyId.toString() !== faculty._id.toString()) {
-      return res.status(403).json({ message: 'You can only start sessions for your own courses' });
-    }
-
-    // Check if there's already an active session for this course today
-    const today = new Date().toISOString().split('T')[0];
-    const existingSession = await AttendanceSession.findOne({
-      courseId,
-      date: today,
-      isActive: true
-    });
-
-    if (existingSession) {
-      return res.status(400).json({ 
-        message: 'An active session already exists for this course today',
-        session: existingSession
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation errors',
+        errors: errors.array()
       });
     }
 
-    // Create new session
+    const { courseId, sessionName, enableFaceRecognition = true } = req.body;
+    const facultyId = req.user.id;
+
+    // Verify course exists and user has permission
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: 'Course not found'
+      });
+    }
+
+    // Check if there's an active session for this course
+    const existingSession = await AttendanceSession.findOne({
+      courseId,
+      status: 'active'
+    });
+
+    if (existingSession) {
+      return res.status(400).json({
+        success: false,
+        message: 'An attendance session is already active for this course'
+      });
+    }
+
+    // Create new attendance session
     const session = new AttendanceSession({
       courseId,
-      facultyId: faculty._id,
-      date: today,
+      facultyId,
+      sessionName,
       startTime: new Date(),
-      totalStudents: course.enrolledStudents.length,
-      isActive: true
+      status: 'active',
+      settings: {
+        enableFaceRecognition,
+        recognitionThreshold: 0.6,
+        livenessThreshold: 0.7,
+        autoMarkAttendance: true,
+        allowManualOverride: true
+      }
     });
 
     await session.save();
 
+    // Initialize face recognition service for this session
+    if (enableFaceRecognition) {
+      try {
+        await axios.post(`${FACE_API_URL}/api/face/retrain`);
+      } catch (faceApiError) {
+        console.warn('Face API initialization warning:', faceApiError.message);
+        // Continue anyway - manual attendance still possible
+      }
+    }
+
     res.status(201).json({
+      success: true,
       message: 'Attendance session started successfully',
-      session: await session.populate('courseId', 'courseName courseCode')
+      session: {
+        id: session._id,
+        courseId: session.courseId,
+        sessionName: session.sessionName,
+        startTime: session.startTime,
+        status: session.status,
+        settings: session.settings
+      }
     });
+
   } catch (error) {
-    console.error('Start session error:', error);
-    res.status(500).json({ message: 'Failed to start attendance session' });
+    console.error('Error starting attendance session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to start attendance session',
+      error: error.message
+    });
   }
 });
 
-// Mark attendance manually
-router.post('/mark', auth, authorize('faculty'), auditLog('CREATE', 'ATTENDANCE'), async (req, res) => {
+/**
+ * Process face recognition for attendance
+ * POST /api/attendance/face-recognition
+ */
+router.post('/face-recognition', [
+  authenticateToken,
+  body('image').notEmpty().withMessage('Image data is required'),
+  body('sessionId').notEmpty().withMessage('Session ID is required')
+], async (req, res) => {
   try {
-    const { sessionId, studentId, status, notes } = req.body;
-    
-    if (!sessionId || !studentId || !status) {
-      return res.status(400).json({ message: 'Session ID, student ID, and status are required' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation errors',
+        errors: errors.array()
+      });
     }
+
+    const { image, sessionId } = req.body;
 
     // Verify session exists and is active
     const session = await AttendanceSession.findById(sessionId);
-    if (!session || !session.isActive) {
-      return res.status(404).json({ message: 'Active session not found' });
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance session not found'
+      });
     }
 
-    // Check if attendance already marked for this student today
+    if (session.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'Attendance session is not active'
+      });
+    }
+
+    // Call face recognition API
+    const recognitionResponse = await axios.post(`${FACE_API_URL}/api/face/recognize`, {
+      image_base64: image,
+      session_id: sessionId,
+      course_id: session.courseId
+    }, {
+      timeout: 10000 // 10 second timeout
+    });
+
+    const faceResult = recognitionResponse.data;
+
+    if (!faceResult.success) {
+      return res.status(200).json({
+        success: false,
+        message: 'No face recognized or face is not live',
+        details: {
+          isLive: faceResult.is_live,
+          livenessConfidence: faceResult.liveness_confidence
+        }
+      });
+    }
+
+    // Get student details
+    const student = await Student.findById(faceResult.student_id);
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found in database'
+      });
+    }
+
+    // Check if attendance already marked today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const existingAttendance = await Attendance.findOne({
+      studentId: student._id,
+      courseId: session.courseId,
+      sessionId: session._id,
+      date: {
+        $gte: today,
+        $lt: tomorrow
+      }
+    });
+
+    if (existingAttendance) {
+      return res.status(200).json({
+        success: false,
+        message: 'Attendance already marked for this student today',
+        student: {
+          id: student._id,
+          name: student.name,
+          studentId: student.studentId
+        },
+        existingAttendance: {
+          timestamp: existingAttendance.timestamp,
+          status: existingAttendance.status
+        }
+      });
+    }
+
+    // Mark attendance
+    const attendance = new Attendance({
+      studentId: student._id,
+      courseId: session.courseId,
+      sessionId: session._id,
+      date: new Date().toISOString().split('T')[0],
+      timestamp: new Date(),
+      status: 'present',
+      recognitionData: {
+        method: 'face_recognition',
+        confidence: faceResult.confidence,
+        livenessScore: faceResult.liveness_confidence,
+        isLive: faceResult.is_live
+      }
+    });
+
+    await attendance.save();
+
+    // Update session statistics
+    await AttendanceSession.findByIdAndUpdate(sessionId, {
+      $inc: {
+        totalRecognitions: 1,
+        successfulRecognitions: 1
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Attendance marked successfully via face recognition',
+      student: {
+        id: student._id,
+        name: student.name,
+        studentId: student.studentId,
+        email: student.email
+      },
+      attendance: {
+        id: attendance._id,
+        timestamp: attendance.timestamp,
+        status: attendance.status,
+        confidence: faceResult.confidence,
+        livenessScore: faceResult.liveness_confidence
+      }
+    });
+
+  } catch (error) {
+    console.error('Face recognition error:', error);
+    
+    // Handle specific API errors
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({
+        success: false,
+        message: 'Face recognition service is unavailable',
+        details: 'Please try manual attendance marking'
+      });
+    }
+
+    if (error.response && error.response.status === 408) {
+      return res.status(408).json({
+        success: false,
+        message: 'Face recognition timeout',
+        details: 'Please try again or use manual attendance'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Face recognition processing failed',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Mark attendance manually (fallback)
+ * POST /api/attendance/manual
+ */
+router.post('/manual', [
+  authenticateToken,
+  requireRole(['faculty', 'admin']),
+  body('sessionId').notEmpty().withMessage('Session ID is required'),
+  body('studentId').notEmpty().withMessage('Student ID is required'),
+  body('status').isIn(['present', 'absent', 'late']).withMessage('Invalid status')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation errors',
+        errors: errors.array()
+      });
+    }
+
+    const { sessionId, studentId, status, notes } = req.body;
+    const facultyId = req.user.id;
+
+    // Verify session and permissions
+    const session = await AttendanceSession.findById(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance session not found'
+      });
+    }
+
+    if (session.facultyId.toString() !== facultyId && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Permission denied for this session'
+      });
+    }
+
+    // Verify student
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    // Check for existing attendance
+    const today = new Date().toISOString().split('T')[0];
     const existingAttendance = await Attendance.findOne({
       studentId,
       courseId: session.courseId,
-      date: session.date
+      sessionId,
+      date: today
     });
 
     if (existingAttendance) {
       // Update existing attendance
       existingAttendance.status = status;
       existingAttendance.timestamp = new Date();
-      existingAttendance.markedBy = req.user._id;
       existingAttendance.notes = notes;
-      existingAttendance.recognitionMethod = 'manual';
+      existingAttendance.recognitionData = {
+        method: 'manual',
+        markedBy: facultyId
+      };
+      
       await existingAttendance.save();
-    } else {
-      // Create new attendance record
-      const attendance = new Attendance({
-        studentId,
-        courseId: session.courseId,
-        sessionId,
-        date: session.date,
-        status,
-        markedBy: req.user._id,
-        notes,
-        recognitionMethod: 'manual'
+
+      return res.status(200).json({
+        success: true,
+        message: 'Attendance updated successfully',
+        attendance: existingAttendance
       });
-      await attendance.save();
-      session.attendanceRecords.push(attendance._id);
     }
 
-    // Update session statistics
-    await updateSessionStatistics(sessionId);
-
-    res.json({ message: 'Attendance marked successfully' });
-  } catch (error) {
-    console.error('Mark attendance error:', error);
-    res.status(500).json({ message: 'Failed to mark attendance' });
-  }
-});
-
-router.post('/recognize', auth, authorize('faculty'), async (req, res) => {
-  try {
-    const { imageData, sessionId } = req.body;
-    
-    if (!imageData || !sessionId) {
-      return res.status(400).json({ message: 'Image data and session ID are required' });
-    }
-    
-    const session = await AttendanceSession.findById(sessionId);
-    if (!session || !session.isActive) {
-      return res.status(404).json({ message: 'Active session not found' });
-    }
-    
-    // Use face recognition service
-    const recognitionResults = await faceRecognitionService.recognizeFace(imageData, session.courseId);
-    
-    // Auto-mark attendance for high-confidence matches
-    for (const result of recognitionResults) {
-      if (result.confidence > 0.8) {
-        // Check if already marked today
-        const existingAttendance = await Attendance.findOne({
-          studentId: result.studentId,
-          courseId: session.courseId,
-          date: session.date
-        });
-
-        if (!existingAttendance) {
-          const attendance = new Attendance({
-            studentId: result.studentId,
-            courseId: session.courseId,
-            sessionId,
-            date: session.date,
-            status: 'present',
-            confidence: result.confidence,
-            recognitionMethod: 'face_recognition'
-          });
-          await attendance.save();
-          session.attendanceRecords.push(attendance._id);
-        }
+    // Create new attendance record
+    const attendance = new Attendance({
+      studentId,
+      courseId: session.courseId,
+      sessionId,
+      date: today,
+      timestamp: new Date(),
+      status,
+      notes,
+      recognitionData: {
+        method: 'manual',
+        markedBy: facultyId
       }
-    }
+    });
 
-    // Update session statistics
-    await updateSessionStatistics(sessionId);
-    
-    res.json({ results: recognitionResults, sessionId, timestamp: new Date() });
+    await attendance.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Attendance marked successfully',
+      attendance
+    });
+
   } catch (error) {
-    console.error('Face recognition error:', error);
-    res.status(500).json({ message: 'Face recognition failed' });
+    console.error('Manual attendance error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to mark attendance',
+      error: error.message
+    });
   }
 });
 
-// Get active sessions for faculty
-router.get('/sessions/active', auth, authorize('faculty'), async (req, res) => {
+/**
+ * Get attendance session details with statistics
+ * GET /api/attendance/sessions/:sessionId
+ */
+router.get('/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
-    const faculty = await Faculty.findOne({ userId: req.user._id });
-    if (!faculty) {
-      return res.status(404).json({ message: 'Faculty profile not found' });
-    }
+    const { sessionId } = req.params;
 
-    const activeSessions = await AttendanceSession.find({
-      facultyId: faculty._id,
-      isActive: true
-    }).populate('courseId', 'courseName courseCode');
+    const session = await AttendanceSession.findById(sessionId)
+      .populate('courseId', 'courseName courseCode')
+      .populate('facultyId', 'name email');
 
-    res.json({ sessions: activeSessions });
-  } catch (error) {
-    console.error('Get active sessions error:', error);
-    res.status(500).json({ message: 'Failed to fetch active sessions' });
-  }
-});
-
-// End attendance session
-router.put('/sessions/:id/end', auth, authorize('faculty'), auditLog('UPDATE', 'ATTENDANCE_SESSION'), async (req, res) => {
-  try {
-    const session = await AttendanceSession.findById(req.params.id);
     if (!session) {
-      return res.status(404).json({ message: 'Session not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
     }
 
-    if (!session.isActive) {
-      return res.status(400).json({ message: 'Session is already ended' });
-    }
-
-    // Update session
-    session.isActive = false;
-    session.endTime = new Date();
-    await session.save();
-
-    // Update final statistics
-    await updateSessionStatistics(req.params.id);
-
-    res.json({ message: 'Session ended successfully', session });
-  } catch (error) {
-    console.error('End session error:', error);
-    res.status(500).json({ message: 'Failed to end session' });
-  }
-});
-
-// Get attendance for a specific session
-router.get('/sessions/:id/attendance', auth, async (req, res) => {
-  try {
-    const session = await AttendanceSession.findById(req.params.id)
-      .populate('courseId', 'courseName courseCode');
-    
-    if (!session) {
-      return res.status(404).json({ message: 'Session not found' });
-    }
-
-    const attendanceRecords = await Attendance.find({ sessionId: req.params.id })
+    // Get attendance records for this session
+    const attendanceRecords = await Attendance.find({ sessionId })
       .populate('studentId', 'name studentId email')
       .sort({ timestamp: -1 });
 
-    res.json({
-      session,
-      attendance: attendanceRecords,
-      statistics: {
-        total: session.totalStudents,
-        present: session.presentStudents,
-        absent: session.absentStudents,
-        late: session.lateStudents
-      }
+    // Get enrolled students for the course
+    const course = await Course.findById(session.courseId)
+      .populate('enrolledStudents', 'name studentId email');
+
+    const totalStudents = course.enrolledStudents.length;
+    const presentCount = attendanceRecords.filter(a => a.status === 'present').length;
+    const absentCount = totalStudents - presentCount;
+
+    // Face recognition statistics
+    const faceRecognitionCount = attendanceRecords.filter(
+      a => a.recognitionData?.method === 'face_recognition'
+    ).length;
+
+    res.status(200).json({
+      success: true,
+      session: {
+        ...session.toJSON(),
+        statistics: {
+          totalStudents,
+          presentCount,
+          absentCount,
+          attendanceRate: totalStudents > 0 ? (presentCount / totalStudents * 100).toFixed(1) : 0,
+          faceRecognitionCount,
+          manualCount: attendanceRecords.length - faceRecognitionCount
+        }
+      },
+      attendanceRecords,
+      enrolledStudents: course.enrolledStudents
     });
+
   } catch (error) {
-    console.error('Get session attendance error:', error);
-    res.status(500).json({ message: 'Failed to fetch session attendance' });
+    console.error('Error fetching session details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch session details',
+      error: error.message
+    });
   }
 });
 
-// Get attendance history
-router.get('/history', auth, async (req, res) => {
+/**
+ * End attendance session
+ * PUT /api/attendance/sessions/:sessionId/end
+ */
+router.put('/sessions/:sessionId/end', [
+  authenticateToken,
+  requireRole(['faculty', 'admin'])
+], async (req, res) => {
   try {
-    const { page = 1, limit = 20, courseId, startDate, endDate } = req.query;
-    
-    let query = {};
-    
-    // Role-based filtering
-    if (req.user.role === 'faculty') {
-      const faculty = await Faculty.findOne({ userId: req.user._id });
-      if (faculty) {
-        const facultyCourses = await Course.find({ facultyId: faculty._id });
-        query.courseId = { $in: facultyCourses.map(c => c._id) };
-      }
-    } else if (req.user.role === 'student') {
-      const student = await Student.findOne({ userId: req.user._id });
-      if (student) {
-        query.studentId = student._id;
-      }
-    }
-    
-    // Apply additional filters
-    if (courseId) query.courseId = courseId;
-    if (startDate && endDate) {
-      query.date = { $gte: startDate, $lte: endDate };
-    }
+    const { sessionId } = req.params;
+    const facultyId = req.user.id;
 
-    const attendanceRecords = await Attendance.find(query)
-      .populate('studentId', 'name studentId email')
-      .populate('courseId', 'courseName courseCode')
-      .populate('sessionId', 'date startTime')
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .sort({ date: -1, timestamp: -1 });
-
-    const total = await Attendance.countDocuments(query);
-
-    res.json({
-      records: attendanceRecords,
-      pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(total / limit),
-        total,
-        limit: parseInt(limit)
-      }
-    });
-  } catch (error) {
-    console.error('Get attendance history error:', error);
-    res.status(500).json({ message: 'Failed to fetch attendance history' });
-  }
-});
-
-// Helper function to update session statistics
-async function updateSessionStatistics(sessionId) {
-  try {
     const session = await AttendanceSession.findById(sessionId);
-    if (!session) return;
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
 
-    const attendanceRecords = await Attendance.find({ sessionId });
-    
-    const present = attendanceRecords.filter(r => r.status === 'present').length;
-    const late = attendanceRecords.filter(r => r.status === 'late').length;
-    const absent = session.totalStudents - present - late;
+    if (session.facultyId.toString() !== facultyId && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Permission denied'
+      });
+    }
 
-    session.presentStudents = present;
-    session.lateStudents = late;
-    session.absentStudents = Math.max(0, absent);
-    
+    if (session.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'Session is not active'
+      });
+    }
+
+    // Update session status
+    session.status = 'completed';
+    session.endTime = new Date();
     await session.save();
+
+    // Calculate final statistics
+    const attendanceCount = await Attendance.countDocuments({ sessionId });
+    const course = await Course.findById(session.courseId);
+    const totalStudents = course.enrolledStudents.length;
+
+    res.status(200).json({
+      success: true,
+      message: 'Attendance session ended successfully',
+      session: {
+        id: session._id,
+        startTime: session.startTime,
+        endTime: session.endTime,
+        duration: Math.round((session.endTime - session.startTime) / (1000 * 60)), // minutes
+        totalStudents,
+        attendanceCount,
+        attendanceRate: totalStudents > 0 ? (attendanceCount / totalStudents * 100).toFixed(1) : 0
+      }
+    });
+
   } catch (error) {
-    console.error('Update session statistics error:', error);
+    console.error('Error ending session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to end session',
+      error: error.message
+    });
   }
-}
+});
+
+/**
+ * Get active attendance sessions
+ * GET /api/attendance/sessions/active
+ */
+router.get('/sessions/active', authenticateToken, async (req, res) => {
+  try {
+    const query = { status: 'active' };
+    
+    // Non-admin users can only see their own sessions
+    if (req.user.role !== 'admin') {
+      query.facultyId = req.user.id;
+    }
+
+    const activeSessions = await AttendanceSession.find(query)
+      .populate('courseId', 'courseName courseCode')
+      .populate('facultyId', 'name email')
+      .sort({ startTime: -1 });
+
+    res.status(200).json({
+      success: true,
+      sessions: activeSessions
+    });
+
+  } catch (error) {
+    console.error('Error fetching active sessions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch active sessions',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get face recognition statistics
+ * GET /api/attendance/face-stats
+ */
+router.get('/face-stats', authenticateToken, async (req, res) => {
+  try {
+    // Call face recognition service for statistics
+    const response = await axios.get(`${FACE_API_URL}/api/face/statistics`, {
+      timeout: 5000
+    });
+
+    res.status(200).json({
+      success: true,
+      ...response.data
+    });
+
+  } catch (error) {
+    console.error('Error fetching face recognition stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch face recognition statistics',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Test face recognition service connectivity
+ * GET /api/attendance/face-health
+ */
+router.get('/face-health', authenticateToken, async (req, res) => {
+  try {
+    const response = await axios.get(`${FACE_API_URL}/api/face/health`, {
+      timeout: 3000
+    });
+
+    res.status(200).json({
+      success: true,
+      faceServiceStatus: 'healthy',
+      faceServiceData: response.data
+    });
+
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      faceServiceStatus: 'unavailable',
+      message: 'Face recognition service is not responding',
+      fallback: 'Manual attendance marking is available'
+    });
+  }
+});
 
 module.exports = router;

@@ -3,12 +3,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+# Database Configuration
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/attendance_system")
 DB_NAME = os.getenv("DB_NAME", "attendance_system")
-FACE_COMPARE_TOLERANCE = float(os.getenv("FACE_COMPARE_TOLERANCE", "0.5"))
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
-EXPORT_DIR = os.getenv("EXPORT_DIR", "exports")
-CAPTURE_DIR = os.getenv("CAPTURE_DIR", "captures")
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "8001"))
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
+
+# Model Configuration
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "weights/yolov8n-face.pt")
+ARCFACE_MODEL_PATH = os.getenv("ARCFACE_MODEL_PATH", "weights/arcface_resnet50.pth")
+LIVENESS_MODEL_PATH = os.getenv("LIVENESS_MODEL_PATH", "weights/liveness_cnn.pth")
+
+# Recognition Thresholds
+MIN_CONFIDENCE = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.6"))
+LIVENESS_THRESHOLD = float(os.getenv("LIVENESS_THRESHOLD", "0.7"))
+DETECTION_CONFIDENCE = float(os.getenv("FACE_DETECTION_CONFIDENCE", "0.7"))
+
+# API Configuration
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("FACE_API_PORT", "8000"))
